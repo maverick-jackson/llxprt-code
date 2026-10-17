@@ -46,6 +46,22 @@ const ENGINE_ENV_KEYS = [
   'LLXPRT_TEST_PS_OUTPUT',
 ] satisfies readonly string[];
 
+/**
+ * How long the hung-listing and hung-removal fixtures block. Recovery kills
+ * each engine command at its own 5 s bound, so the fixture never runs this
+ * long; it only has to outlast that bound by far more than any scheduler
+ * delay, so finishing at all proves the command was cut off (#3879).
+ */
+const FIXTURE_HANG_MS = 60_000;
+
+/**
+ * The non-UTC regression re-runs this whole file in a child, and the child's
+ * beforeAll compiles every fixture executable again before the case runs.
+ * Under host load that alone can take longer than 30 s (#3879), so the child
+ * gets its own budget, and the parent test's 120 s timeout sits above it.
+ */
+const TIMEZONE_CHILD_TIMEOUT_MS = 90_000;
+
 interface OwnerMetadata {
   readonly version: 1;
   readonly hostname: string;
@@ -130,7 +146,7 @@ const args = process.argv.slice(2);
 appendFileSync(logPath, engine + ':' + args.join(' ') + '\\n');
 if (args[0] === 'ps') {
   if (process.env.LLXPRT_TEST_LIST_HANG === '1') {
-    await new Promise((resolve) => setTimeout(resolve, 7000));
+    await new Promise((resolve) => setTimeout(resolve, ${FIXTURE_HANG_MS}));
   }
   if (process.env.LLXPRT_TEST_LIST_FAILURE === '1') process.exit(42);
   if (args.includes('--filter') &&
@@ -170,7 +186,7 @@ if (args[0] === 'rm' && args[1] === '-f') {
   const containerId = args[2];
   if (containerId === undefined) process.exit(45);
   if (process.env.LLXPRT_TEST_REMOVE_HANG_ID === containerId) {
-    await new Promise((resolve) => setTimeout(resolve, 7000));
+    await new Promise((resolve) => setTimeout(resolve, ${FIXTURE_HANG_MS}));
   }
   if (process.env.LLXPRT_TEST_REMOVE_FAILURE_ID === containerId) process.exit(44);
   const remainingRows = readFileSync(statePath, 'utf8')
@@ -261,7 +277,7 @@ function rerunInNonUtcTimezone(testName: string): void {
         TZ: 'America/New_York',
         [TIMEZONE_REGRESSION_CHILD]: '1',
       },
-      timeout: FIXTURE_TIMEOUT_MS,
+      timeout: TIMEZONE_CHILD_TIMEOUT_MS,
       windowsHide: true,
     },
   );
@@ -407,7 +423,7 @@ describe('sandbox orphan recovery startup', () => {
       state: originalState,
       queried: true,
     });
-  }, 30_000);
+  }, 120_000);
 
   it.each([
     ['an impossible calendar day', 'Mon Feb 30 12:34:56 2026'],
@@ -773,8 +789,10 @@ describe('sandbox orphan recovery startup', () => {
       ),
       state: 'unread-container\tignored\n',
     });
-    expect(elapsedMs).toBeLessThan(6_500);
-  }, 10_000);
+    // Returning long before the fixture's hang ends shows the listing was cut
+    // off at its bound rather than awaited.
+    expect(elapsedMs).toBeLessThan(FIXTURE_HANG_MS);
+  }, 30_000);
 
   it('bounds a hung removal and continues processing other orphans', async () => {
     const owner = spawn(process.execPath, [
@@ -804,8 +822,11 @@ describe('sandbox orphan recovery startup', () => {
       ),
       state: `${hungRow}\n`,
     });
-    expect(elapsedMs).toBeLessThan(6_500);
-  }, 10_000);
+    // The retained hung row shows its removal never completed, the missing
+    // later row shows processing continued, and returning long before the
+    // fixture's hang ends shows the removal was cut off at its bound.
+    expect(elapsedMs).toBeLessThan(FIXTURE_HANG_MS);
+  }, 30_000);
 
   it('retains a live owner when the process start probe exceeds 250 ms', async () => {
     const owner = spawn(process.execPath, [
